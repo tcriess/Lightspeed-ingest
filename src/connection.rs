@@ -1,21 +1,26 @@
-use crate::ftl_codec::{FtlCodec, FtlCommand};
+use std::fs;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+
 use futures::{SinkExt, StreamExt};
 use hex::{decode, encode};
 use log::{error, info, warn};
+use rand::{Rng, thread_rng};
 use rand::distributions::{Alphanumeric, Uniform};
-use rand::{thread_rng, Rng};
 use ring::hmac;
-use std::fs;
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
+
+use crate::ftl_codec::{FtlCodec, FtlCommand};
 
 #[derive(Debug)]
 enum FrameCommand {
     Send { data: Vec<String> },
     // Kill,
 }
+
 pub struct Connection {}
+
 #[derive(Debug)]
 pub struct ConnectionState {
     pub hmac_payload: Option<String>,
@@ -91,12 +96,16 @@ impl ConnectionState {
         }
     }
 }
+
 impl Connection {
     //initialize connection
-    pub fn init(stream: TcpStream) {
+    pub fn init(stream: TcpStream, socket: UdpSocket) {
         //Initialize 2 channels so we can communicate between the frame task and the command handling task
         let (frame_send, mut conn_receive) = mpsc::channel::<FtlCommand>(2);
         let (conn_send, mut frame_receive) = mpsc::channel::<FrameCommand>(2);
+        let (rtp_send, mut rtp_recv) = mpsc::channel::<SocketAddr>(1);
+
+        let peer_addr = stream.peer_addr().unwrap();
         //spawn a task whos sole job is to interact with the frame to send and receive information through the codec
         tokio::spawn(async move {
             let mut frame = Framed::new(stream, FtlCodec::new());
@@ -158,6 +167,13 @@ impl Connection {
                         match conn_send.send(FrameCommand::Send { data: resp }).await {
                             Ok(_) => {
                                 info!("Client connected!");
+                                match rtp_send.send(peer_addr).await {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        error!("Error intializing rtp forward {:?}", e);
+                                        return;
+                                    }
+                                }
                                 state.print()
                             }
                             Err(e) => {
@@ -171,6 +187,37 @@ impl Connection {
                     }
                     None => {
                         error!("Nothing received from the frame");
+                        return;
+                    }
+                }
+            }
+        });
+
+        tokio::spawn(async move {
+            loop {
+                info!("waiting rtp_rcv");
+                match rtp_recv.recv().await {
+                    Some(addr) => {
+                        info!("rtp_rcv received, connecting udp");
+                        let new_addr = SocketAddr::new(addr.ip(), 0);
+                        socket.connect(new_addr).await.expect("Could not connect udp socket");
+                        info!("udp connected to {:?}", addr);
+                        let mut buf = [0; 1024];
+                        let mut to_send = 0;
+                        //let mut to_send = (0, addr);
+                        loop {
+                            //let (size, peer_addr) = to_send;
+                            //if size > 0 {
+                            if to_send > 0 {
+                                //info!("would forward now {:?} bytes", to_send)
+                                
+                            }
+                            //to_send = socket.recv_from(&mut buf).await.unwrap();
+                            to_send = socket.recv(&mut buf).await.unwrap();
+                        }
+                    }
+                    Err(e) => {
+                        error!("could not receive udp: {}", e);
                         return;
                     }
                 }

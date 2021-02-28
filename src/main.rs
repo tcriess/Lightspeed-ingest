@@ -9,7 +9,7 @@ use simplelog::*;
 mod connection;
 mod ftl_codec;
 use std::fs::File;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UdpSocket};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -58,9 +58,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         // Wait until someone tries to connect then handle the connection in a new task
-        let (socket, _) = listener.accept().await?;
+        let (tcp_socket, _) = listener.accept().await?;
+        let udp_socket = UdpSocket::bind(format!("{}:65535", bind_address)).await?;
+        info!("Listening on {}:65535", bind_address);
+
         tokio::spawn(async move {
-            connection::Connection::init(socket);
+            connection::Connection::init(tcp_socket, udp_socket);
             // handle_connection(socket).await;
         });
     }
