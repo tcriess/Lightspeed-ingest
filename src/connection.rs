@@ -1,5 +1,4 @@
 use std::fs;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use futures::{SinkExt, StreamExt};
 use hex::{decode, encode};
@@ -12,6 +11,7 @@ use tokio::sync::mpsc;
 use tokio_util::codec::Framed;
 
 use crate::ftl_codec::{FtlCodec, FtlCommand};
+use std::net::SocketAddr;
 
 #[derive(Debug)]
 enum FrameCommand {
@@ -198,6 +198,10 @@ impl Connection {
                 info!("waiting rtp_rcv");
                 match rtp_recv.recv().await {
                     Some(addr) => {
+                        let fwd_socket1 = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                        let fwd_socket2 = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                        fwd_socket1.connect("127.0.0.1:8081").await.unwrap();
+                        fwd_socket2.connect("127.0.0.1:8082").await.unwrap();
                         info!("rtp_rcv received, connecting udp");
                         let new_addr = SocketAddr::new(addr.ip(), 0);
                         socket.connect(new_addr).await.expect("Could not connect udp socket");
@@ -210,14 +214,15 @@ impl Connection {
                             //if size > 0 {
                             if to_send > 0 {
                                 //info!("would forward now {:?} bytes", to_send)
-                                
+                                fwd_socket1.send(&mut buf[0..to_send]).await;
+                                fwd_socket2.send(&mut buf[0..to_send]).await;
                             }
                             //to_send = socket.recv_from(&mut buf).await.unwrap();
                             to_send = socket.recv(&mut buf).await.unwrap();
                         }
                     }
-                    Err(e) => {
-                        error!("could not receive udp: {}", e);
+                    None => {
+                        error!("could not receive udp");
                         return;
                     }
                 }
