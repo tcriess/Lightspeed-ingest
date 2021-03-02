@@ -1,17 +1,22 @@
 use std::fs;
+use std::net::SocketAddr;
+use std::ops::DerefMut;
+use std::sync::Arc;
 
+use dns_lookup::lookup_host;
+use futures::future::join_all;
 use futures::{SinkExt, StreamExt};
 use hex::{decode, encode};
 use log::{error, info, warn};
-use rand::{Rng, thread_rng};
 use rand::distributions::{Alphanumeric, Uniform};
+use rand::{thread_rng, Rng};
 use ring::hmac;
 use tokio::net::{TcpStream, UdpSocket};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
+use tokio::time::{sleep, Duration};
 use tokio_util::codec::Framed;
 
 use crate::ftl_codec::{FtlCodec, FtlCommand};
-use std::net::SocketAddr;
 
 #[derive(Debug)]
 enum FrameCommand {
@@ -24,6 +29,7 @@ pub struct Connection {}
 #[derive(Debug)]
 pub struct ConnectionState {
     pub hmac_payload: Option<String>,
+    pub channel: Option<String>,
     pub protocol_version: Option<String>,
     pub vendor_name: Option<String>,
     pub vendor_version: Option<String>,
@@ -46,9 +52,16 @@ impl ConnectionState {
             None => String::new(),
         }
     }
+    pub fn get_channel(&self) -> String {
+        match &self.channel {
+            Some(s) => s.clone(),
+            None => String::new(),
+        }
+    }
     pub fn new() -> ConnectionState {
         ConnectionState {
             hmac_payload: None,
+            channel: None,
             protocol_version: None,
             vendor_name: None,
             vendor_version: None,
@@ -99,11 +112,11 @@ impl ConnectionState {
 
 impl Connection {
     //initialize connection
-    pub fn init(stream: TcpStream, socket: UdpSocket) {
+    pub fn init(stream: TcpStream, socket: UdpSocket, forward_suffix: &str) {
         //Initialize 2 channels so we can communicate between the frame task and the command handling task
         let (frame_send, mut conn_receive) = mpsc::channel::<FtlCommand>(2);
         let (conn_send, mut frame_receive) = mpsc::channel::<FrameCommand>(2);
-        let (rtp_send, mut rtp_recv) = mpsc::channel::<SocketAddr>(1);
+        let (rtp_send, mut rtp_recv) = mpsc::channel::<(SocketAddr, String)>(2);
 
         let peer_addr = stream.peer_addr().unwrap();
         //spawn a task whos sole job is to interact with the frame to send and receive information through the codec
@@ -167,7 +180,10 @@ impl Connection {
                         match conn_send.send(FrameCommand::Send { data: resp }).await {
                             Ok(_) => {
                                 info!("Client connected!");
-                                match rtp_send.send(peer_addr).await {
+
+                                let channel = state.get_channel();
+
+                                match rtp_send.send((peer_addr, channel)).await {
                                     Ok(_) => {}
                                     Err(e) => {
                                         error!("Error intializing rtp forward {:?}", e);
@@ -193,41 +209,82 @@ impl Connection {
             }
         });
 
-        tokio::spawn(async move {
-            loop {
-                info!("waiting rtp_rcv");
-                match rtp_recv.recv().await {
-                    Some(addr) => {
-                        let fwd_socket1 = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-                        let fwd_socket2 = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-                        fwd_socket1.connect("127.0.0.1:8081").await.unwrap();
-                        fwd_socket2.connect("127.0.0.1:8082").await.unwrap();
-                        info!("rtp_rcv received, connecting udp");
-                        let new_addr = SocketAddr::new(addr.ip(), 0);
-                        socket.connect(new_addr).await.expect("Could not connect udp socket");
-                        info!("udp connected to {:?}", addr);
-                        let mut buf = [0; 1024];
-                        let mut to_send = 0;
-                        //let mut to_send = (0, addr);
-                        loop {
-                            //let (size, peer_addr) = to_send;
-                            //if size > 0 {
-                            if to_send > 0 {
-                                //info!("would forward now {:?} bytes", to_send)
-                                fwd_socket1.send(&mut buf[0..to_send]).await;
-                                fwd_socket2.send(&mut buf[0..to_send]).await;
+        if !forward_suffix.is_empty() {
+            let fw_suffix = format!("{}", forward_suffix);
+            tokio::spawn(async move {
+                let fw_sockets = Arc::new(Mutex::new(vec![]));
+                loop {
+                    match rtp_recv.recv().await {
+                        Some((addr, channel)) => {
+                            let hostname = format!("ch-{}.{}", channel.to_owned(), fw_suffix);
+                            info!("rtp_rcv received, connecting udp");
+                            let new_addr = SocketAddr::new(addr.ip(), 0);
+                            socket
+                                .connect(new_addr)
+                                .await
+                                .expect("Could not connect udp socket");
+                            let mut buf = [0; 4096];
+                            let mut to_send = 0;
+
+                            let fw_sockets_clone = fw_sockets.clone();
+                            tokio::spawn(async move {
+                                loop {
+                                    let sleeper = sleep(Duration::from_millis(60000));
+                                    let mut ips = vec![];
+                                    match lookup_host(&hostname) {
+                                        Ok(res) => {
+                                            for addr in res {
+                                                ips.push(addr);
+                                            }
+                                        }
+                                        Err(_e) => {}
+                                    }
+                                    let mut addr_strings = vec![];
+                                    for ip in ips {
+                                        if ip.is_ipv6() {
+                                            addr_strings
+                                                .push(("[::]:0", format!("[{}]", ip.to_string())));
+                                        } else {
+                                            addr_strings.push(("0.0.0.0:0", ip.to_string()));
+                                        }
+                                    }
+                                    fw_sockets_clone.lock().await.deref_mut().clear();
+                                    for (listen_addr, addr_str) in addr_strings {
+                                        let s = UdpSocket::bind(listen_addr).await.unwrap();
+                                        match s.connect(format!("{}:65535", addr_str)).await {
+                                            Ok(_) => {
+                                                fw_sockets_clone.lock().await.deref_mut().push(s);
+                                            }
+                                            Err(e) => {
+                                                error!("error connecting to remote: {:?}", e)
+                                            }
+                                        }
+                                    }
+                                    sleeper.await;
+                                }
+                            });
+
+                            loop {
+                                if to_send > 0 {
+                                    let mut socks = fw_sockets.lock().await;
+                                    let mut futs = Vec::new();
+
+                                    for fw_socket in socks.deref_mut().iter() {
+                                        futs.push(fw_socket.send(&buf[0..to_send]));
+                                    }
+                                    join_all(futs).await;
+                                }
+                                to_send = socket.recv(&mut buf).await.unwrap();
                             }
-                            //to_send = socket.recv_from(&mut buf).await.unwrap();
-                            to_send = socket.recv(&mut buf).await.unwrap();
+                        }
+                        None => {
+                            error!("could not receive udp");
+                            return;
                         }
                     }
-                    None => {
-                        error!("could not receive udp");
-                        return;
-                    }
                 }
-            }
-        });
+            });
+        }
     }
 }
 
@@ -285,7 +342,7 @@ async fn handle_command(
         FtlCommand::Connect { data } => {
             //make sure we receive a valid channel id and stream key
             match (data.get("stream_key"), data.get("channel_id")) {
-                (Some(key), Some(_channel_id)) => {
+                (Some(key), Some(channel_id)) => {
                     //decode the client hash
                     let client_hash = hex::decode(key).expect("error with hash decode");
                     let key = hmac::Key::new(hmac::HMAC_SHA512, &read_stream_key(false, Some("")));
@@ -299,6 +356,7 @@ async fn handle_command(
                     ) {
                         Ok(_) => {
                             info!("Hashes match!");
+                            conn.channel = Some(channel_id.to_string());
                             let resp = vec!["200\n".to_string()];
                             match sender.send(FrameCommand::Send { data: resp }).await {
                                 Ok(_) => {

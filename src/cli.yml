@@ -18,6 +18,14 @@ args:
         value_name: STREAM_KEY
         help: Optionally set a static Stream Key (will be prefixed with "77-")
         takes_value: true
+
+    - forward-suffix:
+        short: s
+        long: foward-suffix
+        env: LS_INGEST_FW
+        value_name: FORWARD_SUFFIX
+        help: Suffix for the rtp forward address CHANNEL.<suffix>
+        takes_value: true
     
     # Optional path to the log file, creates a simplelog::WriteLogger
     - log-file:

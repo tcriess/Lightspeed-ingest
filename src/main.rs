@@ -33,6 +33,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => default_bind_address,
     };
 
+    let default_forward_suffix = "local";
+    let forward_suffix: &str = match matches.value_of("forward-suffix") {
+        Some(suffix) => {
+            if suffix.is_empty() {
+                default_forward_suffix
+            } else {
+                suffix
+            }
+        }
+        None => default_forward_suffix,
+    };
+
     let mut loggers: Vec<Box<dyn SharedLogger>> = vec![];
     loggers.push(
         match TermLogger::new(LevelFilter::Info, Config::default(), TerminalMode::Mixed) {
@@ -60,10 +72,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Wait until someone tries to connect then handle the connection in a new task
         let (tcp_socket, _) = listener.accept().await?;
         let udp_socket = UdpSocket::bind(format!("{}:65535", bind_address)).await?;
+        let fw_suffix = format!("{}", forward_suffix);
         info!("Listening on {}:65535", bind_address);
 
         tokio::spawn(async move {
-            connection::Connection::init(tcp_socket, udp_socket);
+            connection::Connection::init(tcp_socket, udp_socket, fw_suffix.as_str());
             // handle_connection(socket).await;
         });
     }
