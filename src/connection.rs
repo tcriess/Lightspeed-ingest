@@ -24,6 +24,12 @@ enum FrameCommand {
     // Kill,
 }
 
+#[derive(Debug)]
+enum FwCommand {
+    Send { data: [u8; 4096], len: usize },
+    Lookup { addrs: Vec<(String, String)> },
+}
+
 pub struct Connection {}
 
 #[derive(Debug)]
@@ -210,9 +216,87 @@ impl Connection {
         });
 
         if !forward_suffix.is_empty() {
+            let (lookup_send, mut lookup_recv) = mpsc::channel::<String>(2);
+            let (fw_send, mut fw_recv) = mpsc::channel::<FwCommand>(5);
+            let fw_send_from_lookup = fw_send.clone();
+            tokio::spawn(async move {
+                loop {
+                    match lookup_recv.recv().await {
+                        Some(hostname) => {
+                            let mut ips = vec![];
+                            match lookup_host(&hostname) {
+                                Ok(res) => {
+                                    for addr in res {
+                                        ips.push(addr);
+                                    }
+                                }
+                                Err(_e) => {}
+                            }
+                            let mut addr_strings = vec![];
+                            for ip in ips {
+                                if ip.is_ipv6() {
+                                    addr_strings.push((
+                                        "[::]:0".to_string(),
+                                        format!("[{}]", ip.to_string()),
+                                    ));
+                                } else {
+                                    addr_strings.push(("0.0.0.0:0".to_string(), ip.to_string()));
+                                }
+                            }
+                            fw_send_from_lookup
+                                .send(FwCommand::Lookup {
+                                    addrs: addr_strings,
+                                })
+                                .await
+                                .unwrap();
+                        }
+                        None => {
+                            return;
+                        }
+                    }
+                }
+            });
+            tokio::spawn(async move {
+                // forward task, receive data to send via the fw_ channel
+                // the first thing that should be sent here is a lookup command to determine the target ips
+                let fw_sockets: Arc<Mutex<Vec<UdpSocket>>> = Arc::new(Mutex::new(vec![]));
+                //let mut fw_sockets: Vec<UdpSocket> = vec![];
+                loop {
+                    match fw_recv.recv().await {
+                        Some(fw_command) => match fw_command {
+                            FwCommand::Send { data, len } => {
+                                let mut fw_s = fw_sockets.lock().await;
+                                let mut futs = Vec::new();
+                                for fw_socket in fw_s.deref_mut() {
+                                    futs.push(fw_socket.send(&data[0..len]));
+                                }
+                                join_all(futs).await;
+                            }
+                            FwCommand::Lookup { addrs } => {
+                                fw_sockets.lock().await.deref_mut().clear();
+                                for (listen_addr, addr_str) in addrs {
+                                    let s = UdpSocket::bind(listen_addr).await.unwrap();
+                                    match s.connect(format!("{}:65535", addr_str)).await {
+                                        Ok(_) => {
+                                            fw_sockets.lock().await.deref_mut().push(s);
+                                        }
+                                        Err(e) => {
+                                            error!("error connecting to remote: {:?}", e)
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        None => {
+                            error!("could not read from fw channel");
+                            return;
+                        }
+                    }
+                }
+            });
             let fw_suffix = format!("{}", forward_suffix);
             tokio::spawn(async move {
-                let fw_sockets = Arc::new(Mutex::new(vec![]));
+                //let fw_sockets = Arc::new(Mutex::new(vec![]));
                 loop {
                     match rtp_recv.recv().await {
                         Some((addr, channel)) => {
@@ -226,53 +310,23 @@ impl Connection {
                             let mut buf = [0; 4096];
                             let mut to_send = 0;
 
-                            let fw_sockets_clone = fw_sockets.clone();
                             tokio::spawn(async move {
                                 loop {
                                     let sleeper = sleep(Duration::from_millis(60000));
-                                    let mut ips = vec![];
-                                    match lookup_host(&hostname) {
-                                        Ok(res) => {
-                                            for addr in res {
-                                                ips.push(addr);
-                                            }
-                                        }
-                                        Err(_e) => {}
-                                    }
-                                    let mut addr_strings = vec![];
-                                    for ip in ips {
-                                        if ip.is_ipv6() {
-                                            addr_strings
-                                                .push(("[::]:0", format!("[{}]", ip.to_string())));
-                                        } else {
-                                            addr_strings.push(("0.0.0.0:0", ip.to_string()));
-                                        }
-                                    }
-                                    fw_sockets_clone.lock().await.deref_mut().clear();
-                                    for (listen_addr, addr_str) in addr_strings {
-                                        let s = UdpSocket::bind(listen_addr).await.unwrap();
-                                        match s.connect(format!("{}:65535", addr_str)).await {
-                                            Ok(_) => {
-                                                fw_sockets_clone.lock().await.deref_mut().push(s);
-                                            }
-                                            Err(e) => {
-                                                error!("error connecting to remote: {:?}", e)
-                                            }
-                                        }
-                                    }
+                                    lookup_send.send(hostname.to_string()).await.unwrap();
                                     sleeper.await;
                                 }
                             });
 
                             loop {
                                 if to_send > 0 {
-                                    let mut socks = fw_sockets.lock().await;
-                                    let mut futs = Vec::new();
-
-                                    for fw_socket in socks.deref_mut().iter() {
-                                        futs.push(fw_socket.send(&buf[0..to_send]));
-                                    }
-                                    join_all(futs).await;
+                                    fw_send
+                                        .send(FwCommand::Send {
+                                            data: buf,
+                                            len: to_send,
+                                        })
+                                        .await
+                                        .unwrap();
                                 }
                                 to_send = socket.recv(&mut buf).await.unwrap();
                             }

@@ -168,6 +168,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dns-lookup"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "093d88961fd18c4ecacb8c80cd0b356463ba941ba11e0e01f9cf5271380b79dc"
+dependencies = [
+ "cfg-if 1.0.0",
+ "libc",
+ "socket2",
+ "winapi",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -335,6 +347,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "clap",
+ "dns-lookup",
  "futures",
  "futures-util",
  "hex",
