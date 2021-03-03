@@ -1,5 +1,5 @@
 use std::fs;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::ops::DerefMut;
 use std::sync::Arc;
 
@@ -17,6 +17,7 @@ use tokio::time::{sleep, Duration};
 use tokio_util::codec::Framed;
 
 use crate::ftl_codec::{FtlCodec, FtlCommand};
+use std::cmp::Ordering;
 
 #[derive(Debug)]
 enum FrameCommand {
@@ -27,7 +28,7 @@ enum FrameCommand {
 #[derive(Debug)]
 enum FwCommand {
     Send { data: [u8; 4096], len: usize },
-    Lookup { addrs: Vec<(String, String)> },
+    LookupResult { addrs: Vec<(String, String)> },
 }
 
 pub struct Connection {}
@@ -217,38 +218,61 @@ impl Connection {
 
         if !forward_suffix.is_empty() {
             let (lookup_send, mut lookup_recv) = mpsc::channel::<String>(2);
-            let (fw_send, mut fw_recv) = mpsc::channel::<FwCommand>(5);
+            let (fw_send, mut fw_recv) = mpsc::channel::<FwCommand>(4096);
             let fw_send_from_lookup = fw_send.clone();
             tokio::spawn(async move {
                 loop {
                     match lookup_recv.recv().await {
                         Some(hostname) => {
-                            let mut ips = vec![];
-                            match lookup_host(&hostname) {
-                                Ok(res) => {
-                                    for addr in res {
-                                        ips.push(addr);
+                            let mut ips: Vec<IpAddr> = vec![];
+                            loop {
+                                let sleeper = sleep(Duration::from_millis(60000));
+                                let mut new_ips = vec![];
+                                match lookup_host(&hostname) {
+                                    Ok(res) => {
+                                        for addr in res {
+                                            new_ips.push(addr);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("could not lookup host {}: {}", hostname, e);
                                     }
                                 }
-                                Err(_e) => {}
-                            }
-                            let mut addr_strings = vec![];
-                            for ip in ips {
-                                if ip.is_ipv6() {
-                                    addr_strings.push((
-                                        "[::]:0".to_string(),
-                                        format!("[{}]", ip.to_string()),
-                                    ));
+                                new_ips.sort();
+                                let mut diff = false;
+                                if new_ips.len() != ips.len() {
+                                    diff = true;
                                 } else {
-                                    addr_strings.push(("0.0.0.0:0".to_string(), ip.to_string()));
+                                    for (i, ip) in ips.iter().enumerate() {
+                                        if ip.cmp(&new_ips[i]) != Ordering::Equal {
+                                            diff = true;
+                                            break;
+                                        }
+                                    }
                                 }
+                                if diff {
+                                    ips = new_ips;
+                                    let mut addr_strings = vec![];
+                                    for ip in &ips {
+                                        if ip.is_ipv6() {
+                                            addr_strings.push((
+                                                "[::]:0".to_string(),
+                                                format!("[{}]", ip.to_string()),
+                                            ));
+                                        } else {
+                                            addr_strings
+                                                .push(("0.0.0.0:0".to_string(), ip.to_string()));
+                                        }
+                                    }
+                                    fw_send_from_lookup
+                                        .send(FwCommand::LookupResult {
+                                            addrs: addr_strings,
+                                        })
+                                        .await
+                                        .unwrap();
+                                }
+                                sleeper.await;
                             }
-                            fw_send_from_lookup
-                                .send(FwCommand::Lookup {
-                                    addrs: addr_strings,
-                                })
-                                .await
-                                .unwrap();
                         }
                         None => {
                             return;
@@ -258,9 +282,8 @@ impl Connection {
             });
             tokio::spawn(async move {
                 // forward task, receive data to send via the fw_ channel
-                // the first thing that should be sent here is a lookup command to determine the target ips
+                // the first thing that should be sent here is a LookupResult command which contains the list of addresses to forward to
                 let fw_sockets: Arc<Mutex<Vec<UdpSocket>>> = Arc::new(Mutex::new(vec![]));
-                //let mut fw_sockets: Vec<UdpSocket> = vec![];
                 loop {
                     match fw_recv.recv().await {
                         Some(fw_command) => match fw_command {
@@ -272,7 +295,7 @@ impl Connection {
                                 }
                                 join_all(futs).await;
                             }
-                            FwCommand::Lookup { addrs } => {
+                            FwCommand::LookupResult { addrs } => {
                                 fw_sockets.lock().await.deref_mut().clear();
                                 for (listen_addr, addr_str) in addrs {
                                     let s = UdpSocket::bind(listen_addr).await.unwrap();
@@ -296,7 +319,6 @@ impl Connection {
             });
             let fw_suffix = format!("{}", forward_suffix);
             tokio::spawn(async move {
-                //let fw_sockets = Arc::new(Mutex::new(vec![]));
                 loop {
                     match rtp_recv.recv().await {
                         Some((addr, channel)) => {
@@ -309,15 +331,7 @@ impl Connection {
                                 .expect("Could not connect udp socket");
                             let mut buf = [0; 4096];
                             let mut to_send = 0;
-
-                            tokio::spawn(async move {
-                                loop {
-                                    let sleeper = sleep(Duration::from_millis(60000));
-                                    lookup_send.send(hostname.to_string()).await.unwrap();
-                                    sleeper.await;
-                                }
-                            });
-
+                            lookup_send.send(hostname.to_string()).await.unwrap();
                             loop {
                                 if to_send > 0 {
                                     fw_send
