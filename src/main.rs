@@ -73,7 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (tcp_socket, _) = listener.accept().await?;
         let udp_socket = UdpSocket::bind(format!("{}:65535", bind_address)).await?;
         let fw_suffix = format!("{}", forward_suffix);
-        if !fw_suffix.is_empty {
+        if !fw_suffix.is_empty() {
             info!("Listening on {}:65535", bind_address);
         }
 
