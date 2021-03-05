@@ -124,6 +124,7 @@ impl Connection {
         let (frame_send, mut conn_receive) = mpsc::channel::<FtlCommand>(2);
         let (conn_send, mut frame_receive) = mpsc::channel::<FrameCommand>(2);
         let (rtp_send, mut rtp_recv) = mpsc::channel::<(SocketAddr, String)>(2);
+        let fw_suffix = format!("{}", forward_suffix);
 
         let peer_addr = stream.peer_addr().unwrap();
         //spawn a task whos sole job is to interact with the frame to send and receive information through the codec
@@ -188,13 +189,14 @@ impl Connection {
                             Ok(_) => {
                                 info!("Client connected!");
 
-                                let channel = state.get_channel();
-
-                                match rtp_send.send((peer_addr, channel)).await {
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        error!("Error intializing rtp forward {:?}", e);
-                                        return;
+                                if !fw_suffix.is_empty() {
+                                    let channel = state.get_channel();
+                                    match rtp_send.send((peer_addr, channel)).await {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            error!("Error intializing rtp forward {:?}", e);
+                                            return;
+                                        }
                                     }
                                 }
                                 state.print()

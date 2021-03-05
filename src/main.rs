@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => default_bind_address,
     };
 
-    let default_forward_suffix = "local";
+    let default_forward_suffix = "";
     let forward_suffix: &str = match matches.value_of("forward-suffix") {
         Some(suffix) => {
             if suffix.is_empty() {
@@ -73,7 +73,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (tcp_socket, _) = listener.accept().await?;
         let udp_socket = UdpSocket::bind(format!("{}:65535", bind_address)).await?;
         let fw_suffix = format!("{}", forward_suffix);
-        info!("Listening on {}:65535", bind_address);
+        if !fw_suffix.is_empty {
+            info!("Listening on {}:65535", bind_address);
+        }
 
         tokio::spawn(async move {
             connection::Connection::init(tcp_socket, udp_socket, fw_suffix.as_str());
