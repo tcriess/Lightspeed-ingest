@@ -119,12 +119,13 @@ impl ConnectionState {
 
 impl Connection {
     //initialize connection
-    pub fn init(stream: TcpStream, socket: UdpSocket, forward_suffix: &str) {
+    pub fn init(stream: TcpStream, socket: UdpSocket, forward_suffix: &str, forward_port: &str) {
         //Initialize 2 channels so we can communicate between the frame task and the command handling task
         let (frame_send, mut conn_receive) = mpsc::channel::<FtlCommand>(2);
         let (conn_send, mut frame_receive) = mpsc::channel::<FrameCommand>(2);
         let (rtp_send, mut rtp_recv) = mpsc::channel::<(SocketAddr, String)>(2);
         let fw_suffix = format!("{}", forward_suffix);
+        let fw_port = format!("{}", forward_port);
 
         let peer_addr = stream.peer_addr().unwrap();
         //spawn a task whos sole job is to interact with the frame to send and receive information through the codec
@@ -301,7 +302,7 @@ impl Connection {
                                 fw_sockets.lock().await.deref_mut().clear();
                                 for (listen_addr, addr_str) in addrs {
                                     let s = UdpSocket::bind(listen_addr).await.unwrap();
-                                    match s.connect(format!("{}:65535", addr_str)).await {
+                                    match s.connect(format!("{}:{}", addr_str, fw_port)).await {
                                         Ok(_) => {
                                             fw_sockets.lock().await.deref_mut().push(s);
                                         }

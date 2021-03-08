@@ -22,9 +22,17 @@ args:
     - forward-suffix:
         short: s
         long: foward-suffix
-        env: LS_INGEST_FW
+        env: LS_INGEST_FW_SUFFIX
         value_name: FORWARD_SUFFIX
-        help: Suffix for the rtp forward address CHANNEL.<suffix>
+        help: Suffix for the rtp forward address ch-<channel>.FORWARD_SUFFIX
+        takes_value: true
+
+    - forward-port:
+        short: p
+        long: forward-port
+        env: LS_INGEST_FW_PORT
+        value_name: FORWARD_PORT
+        help: Port to forward the rtp packets to
         takes_value: true
     
     # Optional path to the log file, creates a simplelog::WriteLogger

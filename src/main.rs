@@ -33,6 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => default_bind_address,
     };
 
+    let default_forward_port = "65535";
     let default_forward_suffix = "";
     let forward_suffix: &str = match matches.value_of("forward-suffix") {
         Some(suffix) => {
@@ -43,6 +44,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         None => default_forward_suffix,
+    };
+    let forward_port: &str = match matches.value_of("forward-port") {
+        Some(port) => {
+            if port.is_empty() {
+                default_forward_port
+            } else {
+                port
+            }
+        }
+        None => default_forward_port,
     };
 
     let mut loggers: Vec<Box<dyn SharedLogger>> = vec![];
@@ -72,13 +83,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Wait until someone tries to connect then handle the connection in a new task
         let (tcp_socket, _) = listener.accept().await?;
         let udp_socket = UdpSocket::bind(format!("{}:65535", bind_address)).await?;
+        let fw_port = format!("{}", forward_port);
         let fw_suffix = format!("{}", forward_suffix);
         if !fw_suffix.is_empty() {
             info!("Listening on {}:65535", bind_address);
         }
 
         tokio::spawn(async move {
-            connection::Connection::init(tcp_socket, udp_socket, fw_suffix.as_str());
+            connection::Connection::init(
+                tcp_socket,
+                udp_socket,
+                fw_suffix.as_str(),
+                fw_port.as_str(),
+            );
             // handle_connection(socket).await;
         });
     }
