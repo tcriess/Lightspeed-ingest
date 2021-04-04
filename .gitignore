@@ -8,3 +8,6 @@ target/
 
 # Hash file for password
 hash
+
+# IDE
+/.idea
